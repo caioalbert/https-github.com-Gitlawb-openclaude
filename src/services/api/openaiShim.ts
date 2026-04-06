@@ -61,6 +61,10 @@ const GITHUB_429_MAX_RETRIES = 3
 const GITHUB_429_BASE_DELAY_SEC = 1
 const GITHUB_429_MAX_DELAY_SEC = 32
 const GEMINI_API_HOST = 'generativelanguage.googleapis.com'
+const GROQ_MAX_REQUEST_TOKENS = 12_000
+const GROQ_TARGET_PROMPT_TOKENS = 9_000
+const GROQ_COMPLETION_TOKEN_SAFETY_MARGIN = 500
+const GROQ_TOKEN_ESTIMATE_DIVISOR = 2
 
 function isGithubModelsMode(): boolean {
   return isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
@@ -73,6 +77,15 @@ function hasGeminiApiHost(baseUrl: string | undefined): boolean {
     return new URL(baseUrl).hostname.toLowerCase() === GEMINI_API_HOST
   } catch {
     return false
+  }
+}
+
+function isGroqBaseUrl(baseUrl: string): boolean {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase()
+    return hostname === 'groq.com' || hostname.endsWith('.groq.com')
+  } catch {
+    return baseUrl.toLowerCase().includes('groq.com')
   }
 }
 
@@ -114,6 +127,96 @@ interface OpenAITool {
     parameters: Record<string, unknown>
     strict?: boolean
   }
+}
+
+function estimateJsonBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length
+}
+
+function estimateGroqPromptTokens(value: unknown): number {
+  return Math.ceil(estimateJsonBytes(value) / GROQ_TOKEN_ESTIMATE_DIVISOR)
+}
+
+function stripToolSchemaDescriptions(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(item => stripToolSchemaDescriptions(item))
+  }
+  if (!value || typeof value !== 'object') return value
+
+  const record = value as Record<string, unknown>
+  const reduced: Record<string, unknown> = {}
+  for (const [key, child] of Object.entries(record)) {
+    if (key === 'description') continue
+    reduced[key] = stripToolSchemaDescriptions(child)
+  }
+
+  return reduced
+}
+
+function compactPayloadForGroq(body: Record<string, unknown>): void {
+  let promptTokens = estimateGroqPromptTokens(body)
+  if (promptTokens <= GROQ_TARGET_PROMPT_TOKENS) return
+
+  if (Array.isArray(body.tools)) {
+    body.tools = stripToolSchemaDescriptions(body.tools) as typeof body.tools
+    promptTokens = estimateGroqPromptTokens(body)
+  }
+  if (promptTokens <= GROQ_TARGET_PROMPT_TOKENS) return
+
+  if (Array.isArray(body.messages)) {
+    const messages = [
+      ...(body.messages as Array<{ role?: string } & Record<string, unknown>>),
+    ]
+
+    while (promptTokens > GROQ_TARGET_PROMPT_TOKENS) {
+      const firstNonSystemIndex = messages.findIndex(
+        (message, index) =>
+          message.role !== 'system' && index < messages.length - 1,
+      )
+      if (firstNonSystemIndex === -1) break
+
+      messages.splice(firstNonSystemIndex, 1)
+      body.messages = messages
+      promptTokens = estimateGroqPromptTokens(body)
+    }
+  }
+  if (promptTokens <= GROQ_TARGET_PROMPT_TOKENS) return
+
+  if (body.tools) {
+    delete body.tools
+    body.tool_choice = 'none'
+    promptTokens = estimateGroqPromptTokens(body)
+  }
+  if (promptTokens <= GROQ_TARGET_PROMPT_TOKENS) return
+
+  if (Array.isArray(body.messages)) {
+    const messages = body.messages as Array<
+      { role?: string } & Record<string, unknown>
+    >
+    const lastUserMessage = [...messages]
+      .reverse()
+      .find(message => message.role === 'user')
+    const lastMessage = lastUserMessage ?? messages[messages.length - 1]
+    body.messages = lastMessage ? [lastMessage] : []
+  }
+}
+
+function clampGroqMaxTokens(body: Record<string, unknown>): void {
+  const currentMaxTokens =
+    typeof body.max_tokens === 'number'
+      ? body.max_tokens
+      : typeof body.max_completion_tokens === 'number'
+        ? body.max_completion_tokens
+        : 4000
+
+  const estimatedPromptTokens = estimateGroqPromptTokens(body)
+  const availableCompletionTokens =
+    GROQ_MAX_REQUEST_TOKENS -
+    estimatedPromptTokens -
+    GROQ_COMPLETION_TOKEN_SAFETY_MARGIN
+
+  body.max_tokens = Math.min(currentMaxTokens, Math.max(1, availableCompletionTokens))
+  delete body.max_completion_tokens
 }
 
 function convertSystemPrompt(
@@ -1088,6 +1191,12 @@ class OpenAIShimMessages {
           }
         }
       }
+    }
+
+    if (isGroqBaseUrl(request.baseUrl)) {
+      delete body.stream_options
+      compactPayloadForGroq(body)
+      clampGroqMaxTokens(body)
     }
 
     const headers: Record<string, string> = {
