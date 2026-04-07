@@ -237,6 +237,7 @@ import { useOfficialMarketplaceNotification } from 'src/hooks/useOfficialMarketp
 import { usePromptsFromClaudeInChrome } from 'src/hooks/usePromptsFromClaudeInChrome.js';
 import { getTipToShowOnSpinner, recordShownTip } from 'src/services/tips/tipScheduler.js';
 import type { Theme } from 'src/utils/theme.js';
+import { shouldRunStartupChecks } from './replStartupGates.js';
 import { isPromptTypingSuppressionActive } from './replInputSuppression.js';
 import { checkAndDisableBypassPermissionsIfNeeded, checkAndDisableAutoModeIfNeeded, useKickOffCheckAndDisableBypassPermissionsIfNeeded, useKickOffCheckAndDisableAutoModeIfNeeded } from 'src/utils/permissions/bypassPermissionsKillswitch.js';
 import { SandboxManager } from 'src/utils/sandbox/sandbox-adapter.js';
@@ -786,17 +787,6 @@ export function REPL({
 
   // Start background plugin installations
 
-  // SECURITY: This code is guaranteed to run ONLY after the "trust this folder" dialog
-  // has been confirmed by the user. The trust dialog is shown in cli.tsx (line ~387)
-  // before the REPL component is rendered. The dialog blocks execution until the user
-  // accepts, and only then is the REPL component mounted and this effect runs.
-  // This ensures that plugin installations from repository and user settings only
-  // happen after explicit user consent to trust the current working directory.
-  useEffect(() => {
-    if (isRemoteSession) return;
-    void performStartupChecks(setAppState);
-  }, [setAppState, isRemoteSession]);
-
   // Allow Claude in Chrome MCP to send prompts through MCP notifications
   // and sync permission mode changes to the Chrome extension
   usePromptsFromClaudeInChrome(isRemoteSession ? EMPTY_MCP_CLIENTS : mcpClients, toolPermissionContext.mode);
@@ -1338,6 +1328,43 @@ export function REPL({
   const inputValueRef = useRef(inputValue);
   inputValueRef.current = inputValue;
   const promptTypingSuppressionActive = isPromptTypingSuppressionActive(isPromptInputActive, inputValue);
+  const startupChecksStartedRef = useRef(false);
+
+  // SECURITY: This code is guaranteed to run ONLY after the "trust this folder" dialog
+  // has been confirmed by the user. The trust dialog is shown in cli.tsx (line ~387)
+  // before the REPL component is rendered. The dialog blocks execution until the user
+  // accepts, and only then is the REPL component mounted and this effect runs.
+  // This ensures that plugin installations from repository and user settings only
+  // happen after explicit user consent to trust the current working directory.
+  useEffect(() => {
+    if (
+      !shouldRunStartupChecks(
+        isRemoteSession,
+        startupChecksStartedRef.current,
+        isPromptInputActive,
+      )
+    ) {
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      if (
+        !shouldRunStartupChecks(
+          isRemoteSession,
+          startupChecksStartedRef.current,
+          isPromptInputActive,
+        )
+      ) {
+        return;
+      }
+
+      startupChecksStartedRef.current = true;
+      void performStartupChecks(setAppState);
+    }, PROMPT_SUPPRESSION_MS);
+
+    return () => clearTimeout(timeout);
+  }, [setAppState, isRemoteSession, isPromptInputActive]);
+
   const insertTextRef = useRef<{
     insert: (text: string) => void;
     setInputWithCursor: (value: string, cursor: number) => void;
