@@ -25,6 +25,10 @@ import {
 } from './fileHistory.js'
 import { logError } from './log.js'
 import {
+  getAPIProvider,
+  isOpenAICompatibleProvider,
+} from './model/providers.js'
+import {
   createAssistantMessage,
   createUserMessage,
   filterOrphanedThinkingOnlyMessages,
@@ -178,6 +182,33 @@ export type DeserializeResult = {
 }
 
 /**
+ * Remove thinking/redacted_thinking content blocks from assistant messages.
+ * Messages that become empty after stripping are removed entirely.
+ */
+function stripThinkingBlocks(messages: NormalizedMessage[]): NormalizedMessage[] {
+  return messages.reduce<NormalizedMessage[]>((acc, msg) => {
+    if (msg.type !== 'assistant' || !Array.isArray(msg.message?.content)) {
+      acc.push(msg)
+      return acc
+    }
+    const filtered = msg.message.content.filter(
+      (block: { type?: string }) =>
+        block.type !== 'thinking' && block.type !== 'redacted_thinking',
+    )
+    if (filtered.length === 0) {
+      logError(
+        new Error(
+          'conversationRecovery: removed assistant message containing only thinking blocks during 3P resume sanitization',
+        ),
+      )
+      return acc
+    }
+    acc.push({ ...msg, message: { ...msg.message, content: filtered } })
+    return acc
+  }, [])
+}
+
+/**
  * Deserializes messages from a log file into the format expected by the REPL.
  * Filters unresolved tool uses, orphaned thinking messages, and appends a
  * synthetic assistant sentinel when the last message is from the user.
@@ -227,10 +258,18 @@ export function deserializeMessagesWithInterruptDetection(
       filteredToolUses,
     ) as NormalizedMessage[]
 
+    // Strip thinking/redacted_thinking content blocks from assistant messages
+    // when resuming against a 3P provider. These Anthropic-specific blocks cause
+    // 400 errors or context corruption on OpenAI-compatible providers (issue #248 finding 5).
+    const provider = getAPIProvider()
+    const thinkingStripped = isOpenAICompatibleProvider(provider)
+      ? stripThinkingBlocks(filteredThinking)
+      : filteredThinking
+
     // Filter out assistant messages with only whitespace text content.
     // This can happen when model outputs "\n\n" before thinking, user cancels mid-stream.
     const filteredMessages = filterWhitespaceOnlyAssistantMessages(
-      filteredThinking,
+      thinkingStripped,
     ) as NormalizedMessage[]
 
     const internalState = detectTurnInterruption(filteredMessages)

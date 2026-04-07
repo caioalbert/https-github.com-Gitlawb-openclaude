@@ -619,6 +619,55 @@ test('preserves Gemini tool call extra_content from streaming chunks', async () 
   })
 })
 
+test('strips thinking blocks from assistant messages instead of leaking them as text', async () => {
+  let requestBody: Record<string, unknown> | undefined
+
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body))
+
+    return new Response(
+      JSON.stringify({
+        id: 'chatcmpl-1',
+        model: 'gpt-4o',
+        choices: [
+          {
+            message: { role: 'assistant', content: 'done' },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 },
+      }),
+      { headers: { 'Content-Type': 'application/json' } },
+    )
+  }) as FetchType
+
+  const client = createOpenAIShimClient({}) as OpenAIShimClient
+
+  await client.beta.messages.create({
+    model: 'gpt-4o',
+    system: 'test',
+    messages: [
+      { role: 'user', content: 'hello' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'secret reasoning' },
+          { type: 'text', text: 'visible reply' },
+        ],
+      },
+      { role: 'user', content: 'follow up' },
+    ],
+    max_tokens: 64,
+    stream: false,
+  })
+
+  const msgs = requestBody?.messages as Array<{ role: string; content: string }>
+  const assistantMsg = msgs.find(m => m.role === 'assistant')
+
+  expect(assistantMsg?.content).toBe('visible reply')
+  expect(assistantMsg?.content).not.toContain('thinking')
+})
+
 test('normalizes plain string Bash tool arguments from OpenAI-compatible responses', async () => {
   globalThis.fetch = (async (_input, _init) => {
     return new Response(

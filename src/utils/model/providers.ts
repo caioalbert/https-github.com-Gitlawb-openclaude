@@ -33,6 +33,15 @@ export function getAPIProvider(): APIProvider {
 export function usesAnthropicAccountFlow(): boolean {
   return getAPIProvider() === 'firstParty'
 }
+
+export function isOpenAICompatibleProvider(provider: APIProvider): boolean {
+  return (
+    provider === 'openai' ||
+    provider === 'gemini' ||
+    provider === 'github' ||
+    provider === 'codex'
+  )
+}
 function isCodexModel(): boolean {
   return shouldUseCodexTransport(
     process.env.OPENAI_MODEL || '',
