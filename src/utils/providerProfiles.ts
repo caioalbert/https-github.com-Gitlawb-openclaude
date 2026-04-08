@@ -19,6 +19,8 @@ export type ProviderPreset =
   | 'azure-openai'
   | 'openrouter'
   | 'lmstudio'
+  | 'dashscope-cn'
+  | 'dashscope-intl'
   | 'custom'
 
 export type ProviderProfileInput = {
@@ -216,6 +218,24 @@ export function getProviderPresetDefaults(
         model: 'local-model',
         apiKey: '',
         requiresApiKey: false,
+      }
+    case 'dashscope-cn':
+      return {
+        provider: 'openai',
+        name: 'Alibaba Coding Plan (China)',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        model: 'qwen3.5-plus',
+        apiKey: '',
+        requiresApiKey: true,
+      }
+    case 'dashscope-intl':
+      return {
+        provider: 'openai',
+        name: 'Alibaba Coding Plan',
+        baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+        model: 'qwen3.5-plus',
+        apiKey: '',
+        requiresApiKey: true,
       }
     case 'custom':
       return {
