@@ -225,7 +225,7 @@ export function getProviderPresetDefaults(
         name: 'Alibaba Coding Plan (China)',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         model: 'qwen3.5-plus',
-        apiKey: '',
+        apiKey: process.env.DASHSCOPE_API_KEY ?? '',
         requiresApiKey: true,
       }
     case 'dashscope-intl':
@@ -234,7 +234,7 @@ export function getProviderPresetDefaults(
         name: 'Alibaba Coding Plan',
         baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
         model: 'qwen3.5-plus',
-        apiKey: '',
+        apiKey: process.env.DASHSCOPE_API_KEY ?? '',
         requiresApiKey: true,
       }
     case 'custom':
