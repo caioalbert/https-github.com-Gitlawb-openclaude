@@ -114,6 +114,18 @@ test('unknown openai-compatible models still use the conservative fallback windo
   expect(getContextWindowForModel('some-unknown-3p-model')).toBe(8_000)
 })
 
+test('DashScope qwen3.6-plus uses provider-specific context and output caps', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+
+  expect(getContextWindowForModel('qwen3.6-plus')).toBe(1_000_000)
+  expect(getModelMaxOutputTokens('qwen3.6-plus')).toEqual({
+    default: 65_536,
+    upperLimit: 65_536,
+  })
+  expect(getMaxOutputTokensForModel('qwen3.6-plus')).toBe(65_536)
+})
+
 test('DashScope qwen3.5-plus uses provider-specific context and output caps', () => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
@@ -229,6 +241,7 @@ test('DashScope models clamp oversized max output overrides to the provider limi
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = '100000'
 
+  expect(getMaxOutputTokensForModel('qwen3.6-plus')).toBe(65_536)
   expect(getMaxOutputTokensForModel('qwen3.5-plus')).toBe(65_536)
   expect(getMaxOutputTokensForModel('qwen3-coder-next')).toBe(65_536)
   expect(getMaxOutputTokensForModel('qwen3-max')).toBe(32_768)
