@@ -403,6 +403,107 @@ test('preserves usage from final OpenAI stream chunk with empty choices', async 
   expect(usageEvent?.usage?.output_tokens).toBe(45)
 })
 
+test('compacts Groq payloads by token budget', async () => {
+  let requestBody: Record<string, unknown> | undefined
+
+  process.env.OPENAI_BASE_URL = 'https://api.groq.com/openai/v1'
+
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body))
+
+    return new Response(
+      JSON.stringify({
+        id: 'chatcmpl-1',
+        model: 'llama-3.1',
+        choices: [
+          {
+            message: {
+              role: 'assistant',
+              content: 'done',
+            },
+            finish_reason: 'stop',
+          },
+        ],
+      }),
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      },
+    )
+  }) as FetchType
+
+  const client = createOpenAIShimClient({}) as OpenAIShimClient
+
+  await client.beta.messages.create({
+    model: 'llama-3.1',
+    system: 'test',
+    messages: [{ role: 'user', content: 'oi' }],
+    tools: [
+      {
+        name: 'LargeTokenTool',
+        description: 'd'.repeat(300 * 1024),
+        input_schema: {
+          type: 'object',
+          properties: {},
+        },
+      },
+    ],
+    max_tokens: 256,
+    stream: false,
+  })
+
+  const firstTool = (requestBody?.tools as Array<{ function?: { description?: string } }> | undefined)?.[0]
+  expect(firstTool?.function?.description).toBeUndefined()
+  expect(requestBody).not.toHaveProperty('stream_options')
+  expect(requestBody).toHaveProperty('max_tokens')
+})
+
+test('caps Groq max_tokens when prompt is near token budget', async () => {
+  let requestBody: Record<string, unknown> | undefined
+
+  process.env.OPENAI_BASE_URL = 'https://api.groq.com/openai/v1'
+
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body))
+
+    return new Response(
+      JSON.stringify({
+        id: 'chatcmpl-1',
+        model: 'llama-3.1',
+        choices: [
+          {
+            message: {
+              role: 'assistant',
+              content: 'done',
+            },
+            finish_reason: 'stop',
+          },
+        ],
+      }),
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      },
+    )
+  }) as FetchType
+
+  const client = createOpenAIShimClient({}) as OpenAIShimClient
+
+  await client.beta.messages.create({
+    model: 'llama-3.1',
+    system: 'test',
+    messages: [{ role: 'user', content: 'x'.repeat(17 * 1024) }],
+    max_tokens: 4000,
+    stream: false,
+  })
+
+  expect(typeof requestBody?.max_tokens).toBe('number')
+  expect((requestBody?.max_tokens as number)).toBeLessThan(4000)
+  expect((requestBody?.max_tokens as number)).toBeGreaterThanOrEqual(1)
+})
+
 test('preserves Gemini tool call extra_content in follow-up requests', async () => {
   let requestBody: Record<string, unknown> | undefined
 
