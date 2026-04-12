@@ -570,7 +570,7 @@ export function addProviderProfile(
 
   const activeProfile = getActiveProviderProfile()
   if (activeProfile?.id === profile.id) {
-    applyProviderProfileToProcessEnv(profile)
+    setActiveProviderProfile(profile.id)
     clearActiveOpenAIModelOptionsCache()
   }
 
