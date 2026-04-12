@@ -58,7 +58,14 @@ function normalizeBaseUrl(value: string): string {
 function sanitizeProfile(profile: ProviderProfile): ProviderProfile | null {
   const id = trimValue(profile.id)
   const name = trimValue(profile.name)
-  const provider = profile.provider === 'anthropic' ? 'anthropic' : 'openai'
+  const provider =
+    profile.provider === 'anthropic'
+      ? 'anthropic'
+      : profile.provider === 'mistral'
+        ? 'mistral'
+        : profile.provider === 'gemini'
+          ? 'gemini'
+          : 'openai'
   const baseUrl = normalizeBaseUrl(profile.baseUrl)
   const model = trimValue(profile.model)
 
@@ -159,7 +166,7 @@ export function getProviderPresetDefaults(
       }
     case 'gemini':
       return {
-        provider: 'openai',
+        provider: 'gemini',
         name: 'Google Gemini',
         baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
         model: 'gemini-3-flash-preview',
@@ -168,7 +175,7 @@ export function getProviderPresetDefaults(
       }
     case 'mistral':
       return {
-        provider: 'openai',
+        provider: 'mistral',
         name: 'Mistral',
         baseUrl: 'https://api.mistral.ai/v1',
         model: 'devstral-latest',
@@ -297,6 +304,7 @@ function hasConflictingProviderFlagsForProfile(
 
   return (
     processEnv.CLAUDE_CODE_USE_GEMINI !== undefined ||
+    processEnv.CLAUDE_CODE_USE_MISTRAL !== undefined ||
     processEnv.CLAUDE_CODE_USE_GITHUB !== undefined ||
     processEnv.CLAUDE_CODE_USE_BEDROCK !== undefined ||
     processEnv.CLAUDE_CODE_USE_VERTEX !== undefined ||
@@ -335,6 +343,38 @@ function isProcessEnvAlignedWithProfile(
       sameOptionalEnvValue(processEnv.ANTHROPIC_MODEL, getPrimaryModel(profile.model)) &&
       (!includeApiKey ||
         sameOptionalEnvValue(processEnv.ANTHROPIC_API_KEY, profile.apiKey))
+    )
+  }
+
+  if (profile.provider === 'mistral') {
+    return (
+      processEnv.CLAUDE_CODE_USE_MISTRAL !== undefined &&
+      processEnv.CLAUDE_CODE_USE_GEMINI === undefined &&
+      processEnv.CLAUDE_CODE_USE_OPENAI === undefined &&
+      processEnv.CLAUDE_CODE_USE_GITHUB === undefined &&
+      processEnv.CLAUDE_CODE_USE_BEDROCK === undefined &&
+      processEnv.CLAUDE_CODE_USE_VERTEX === undefined &&
+      processEnv.CLAUDE_CODE_USE_FOUNDRY === undefined &&
+      sameOptionalEnvValue(processEnv.MISTRAL_BASE_URL, profile.baseUrl) &&
+      sameOptionalEnvValue(processEnv.MISTRAL_MODEL, profile.model) &&
+      (!includeApiKey ||
+        sameOptionalEnvValue(processEnv.MISTRAL_API_KEY, profile.apiKey))
+    )
+  }
+
+  if (profile.provider === 'gemini') {
+    return (
+      processEnv.CLAUDE_CODE_USE_GEMINI !== undefined &&
+      processEnv.CLAUDE_CODE_USE_MISTRAL === undefined &&
+      processEnv.CLAUDE_CODE_USE_OPENAI === undefined &&
+      processEnv.CLAUDE_CODE_USE_GITHUB === undefined &&
+      processEnv.CLAUDE_CODE_USE_BEDROCK === undefined &&
+      processEnv.CLAUDE_CODE_USE_VERTEX === undefined &&
+      processEnv.CLAUDE_CODE_USE_FOUNDRY === undefined &&
+      sameOptionalEnvValue(processEnv.GEMINI_BASE_URL, profile.baseUrl) &&
+      sameOptionalEnvValue(processEnv.GEMINI_MODEL, profile.model) &&
+      (!includeApiKey ||
+        sameOptionalEnvValue(processEnv.GEMINI_API_KEY, profile.apiKey))
     )
   }
 
@@ -412,6 +452,28 @@ export function applyProviderProfileToProcessEnv(profile: ProviderProfile): void
     delete process.env.OPENAI_API_BASE
     delete process.env.OPENAI_MODEL
     delete process.env.OPENAI_API_KEY
+    return
+  }
+
+  if (profile.provider === 'mistral') {
+    process.env.CLAUDE_CODE_USE_MISTRAL = '1'
+    process.env.MISTRAL_BASE_URL = profile.baseUrl
+    process.env.MISTRAL_MODEL = profile.model
+
+    delete process.env.OPENAI_BASE_URL
+    delete process.env.OPENAI_API_KEY
+    delete process.env.OPENAI_MODEL
+    return
+  }
+
+  if (profile.provider === 'gemini') {
+    process.env.CLAUDE_CODE_USE_GEMINI = '1'
+    process.env.GEMINI_BASE_URL = profile.baseUrl
+    process.env.GEMINI_MODEL = profile.model
+
+    delete process.env.OPENAI_BASE_URL
+    delete process.env.OPENAI_API_KEY
+    delete process.env.OPENAI_MODEL
     return
   }
 

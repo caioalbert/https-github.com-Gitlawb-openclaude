@@ -184,7 +184,7 @@ export type OutputStyle = string
 export type ProviderProfile = {
   id: string
   name: string
-  provider: 'openai' | 'anthropic'
+  provider: 'openai' | 'anthropic' | 'mistral' | 'gemini'
   baseUrl: string
   model: string
   apiKey?: string
