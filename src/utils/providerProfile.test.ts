@@ -166,7 +166,7 @@ test('matching persisted gemini env is reused for gemini launch', async () => {
   assert.equal(env.GEMINI_BASE_URL, 'https://example.test/v1beta/openai')
 })
 
-test('openai env takes precedence over gemini', async () => {
+test('openai env variables take precedence over gemini', async () => {
   const env = await buildLaunchEnv({
     profile: 'gemini',
     persisted: profile('openai', {
