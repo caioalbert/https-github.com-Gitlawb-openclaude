@@ -31,6 +31,9 @@ export {
 } from './providerSecrets.js'
 import { isEnvTruthy } from './envUtils.ts'
 
+import { PROVIDERS } from './configConstants.js'
+import provider from 'src/commands/provider/index.js'
+
 export const PROFILE_FILE_NAME = '.openclaude-profile.json'
 export const DEFAULT_GEMINI_BASE_URL =
   'https://generativelanguage.googleapis.com/v1beta/openai'
@@ -573,6 +576,20 @@ export async function buildLaunchEnv(options: {
   )
   const persistedGeminiKey = sanitizeApiKey(persistedEnv.GEMINI_API_KEY)
   const persistedGeminiAuthMode = persistedEnv.GEMINI_AUTH_MODE
+
+  if (hasExplicitProviderSelection(processEnv)) {
+    for (let provider of PROVIDERS) {
+      if (provider === "anthropic") {
+        continue;
+      }
+
+      const env_key_name = `CLAUDE_CODE_USE_${provider.toUpperCase()}`
+
+      if (env_key_name in processEnv && isEnvTruthy(processEnv[env_key_name])) {
+        options.profile = provider;
+      }
+    }
+  }
 
   if (options.profile === 'gemini') {
     const env: NodeJS.ProcessEnv = {
