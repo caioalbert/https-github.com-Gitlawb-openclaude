@@ -21,9 +21,13 @@ import {
 import { isEnvTruthy } from '../envUtils.js'
 import { getModelStrings, resolveOverriddenModel } from './modelStrings.js'
 import { formatModelPricing, getOpus46CostTier } from '../modelCost.js'
-import { getSettings_DEPRECATED } from '../settings/settings.js'
+import { getInitialSettings, getSettings_DEPRECATED } from '../settings/settings.js'
 import type { PermissionMode } from '../permissions/PermissionMode.js'
 import { getAPIProvider } from './providers.js'
+import {
+  getCachedOllamaModelOptions,
+  isOllamaProvider,
+} from './ollamaModels.js'
 import { LIGHTNING_BOLT } from '../../constants/figures.js'
 import { isModelAllowed } from './modelAllowlist.js'
 import { type ModelAlias, isModelAlias } from './aliases.js'
@@ -33,21 +37,47 @@ export type ModelShortName = string
 export type ModelName = string
 export type ModelSetting = ModelName | ModelAlias | null
 
+/**
+ * Return the small/fast model for the active provider.
+ *
+ * This is the cheap tier used for side-calls (compaction, away summaries,
+ * token estimation, agentic search, hooks, etc.) where the full capability
+ * of the main-loop model isn't needed. Keeping this provider-agnostic is
+ * critical: openclaude supports OpenAI, Gemini, Bedrock, Vertex, Foundry,
+ * GitHub Copilot, and Anthropic first-party — any of them can be the active
+ * provider, and each needs a sensible cheap default.
+ *
+ * Priority:
+ *   1. CLAUDE_CODE_SMALL_FAST_MODEL — provider-agnostic explicit session override.
+ *   2. ANTHROPIC_SMALL_FAST_MODEL — legacy env var kept for backwards compatibility.
+ *   3. settings.modelTiers.small — persistent per-project/user override in settings.json.
+ *      No env vars needed; survives shell restarts and works with any provider.
+ *   4. getModelStrings().haiku45 — resolved per-provider via ALL_MODEL_CONFIGS
+ *      (Anthropic → Haiku, OpenAI → gpt-4o-mini, Gemini → gemini-2.0-flash-lite,
+ *      Bedrock/Vertex/Foundry → Haiku in the provider's format). Adding a new
+ *      provider only requires extending ALL_MODEL_CONFIGS — this function and
+ *      every call site pick it up automatically.
+ *
+ * Deliberately does NOT fall back to OPENAI_MODEL or GEMINI_MODEL. Those env
+ * vars hold the user's main-loop model, which is typically an expensive tier
+ * (gpt-4.1, gemini-2.5-pro-preview). Using them here would defeat the cost
+ * savings of routing side-calls through the small/fast tier.
+ */
 export function getSmallFastModel(): ModelName {
-  if (process.env.ANTHROPIC_SMALL_FAST_MODEL) return process.env.ANTHROPIC_SMALL_FAST_MODEL
-  // For Gemini provider, use a fast model
-  if (getAPIProvider() === 'gemini') {
-    return process.env.GEMINI_MODEL || 'gemini-2.0-flash-lite'
+  if (process.env.CLAUDE_CODE_SMALL_FAST_MODEL) {
+    return process.env.CLAUDE_CODE_SMALL_FAST_MODEL
   }
-  // For OpenAI provider, use OPENAI_MODEL or a sensible default
-  if (getAPIProvider() === 'openai') {
-    return process.env.OPENAI_MODEL || 'gpt-4o-mini'
+  if (process.env.ANTHROPIC_SMALL_FAST_MODEL) {
+    return process.env.ANTHROPIC_SMALL_FAST_MODEL
   }
-  // For GitHub Copilot provider
-  if (getAPIProvider() === 'github') {
-    return process.env.OPENAI_MODEL || 'github:copilot'
+  const tiersSmall = getInitialSettings().modelTiers?.small
+  if (tiersSmall) {
+    return tiersSmall
   }
-  return getDefaultHaikuModel()
+  // ALL_MODEL_CONFIGS maps haiku45 to the cheapest model for every provider
+  // (firstParty, bedrock, vertex, foundry, openai, gemini, github, codex).
+  // Adding a new provider only requires extending ALL_MODEL_CONFIGS.
+  return getModelStrings().haiku45
 }
 
 export function isNonCustomOpusModel(model: ModelName): boolean {
@@ -183,28 +213,56 @@ export function getDefaultSonnetModel(): ModelName {
 }
 
 // @[MODEL LAUNCH]: Update the default Haiku model (3P providers may lag so keep defaults unchanged).
+/**
+ * Return the small/cheap model to surface in the model picker's "Haiku" slot
+ * and to use wherever an explicit cheap-tier model is needed (attachments,
+ * alias resolution, etc.).
+ *
+ * Priority:
+ *   1. CLAUDE_CODE_DEFAULT_SMALL_MODEL — provider-agnostic explicit session override.
+ *      Use this with Ollama, LM Studio, or any engine where you need a specific
+ *      lightweight model in the small tier for the current session.
+ *   2. ANTHROPIC_DEFAULT_HAIKU_MODEL — legacy env var from Claude Code kept
+ *      for backwards compatibility with enterprise managed deployments.
+ *   3. settings.modelTiers.small — persistent per-project/user override in settings.json.
+ *      The recommended way for Ollama/LM Studio users: set once, no env vars needed.
+ *      Example: { "modelTiers": { "small": "llama3.2:3b" } }
+ *   4. Ollama detection — when OLLAMA_BASE_URL or port 11434 is detected and
+ *      no explicit model is configured, use the first available local model
+ *      from the cached /api/tags response (the user's lightest installed
+ *      model), or fall back to OPENAI_MODEL (at least callable locally).
+ *   5. getModelStrings().haiku45 — resolved per provider via ALL_MODEL_CONFIGS:
+ *      Anthropic → Haiku 4.5, OpenAI API → gpt-4o-mini,
+ *      Gemini → gemini-2.0-flash-lite, Bedrock/Vertex/Foundry → Haiku format.
+ *
+ * Deliberately does NOT fall back to OPENAI_MODEL or GEMINI_MODEL — those hold
+ * the user's main-loop (potentially expensive) model.
+ */
 export function getDefaultHaikuModel(): ModelName {
+  if (process.env.CLAUDE_CODE_DEFAULT_SMALL_MODEL) {
+    return process.env.CLAUDE_CODE_DEFAULT_SMALL_MODEL
+  }
   if (process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL) {
     return process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
   }
-  // OpenAI provider
-  if (getAPIProvider() === 'openai') {
-    return process.env.OPENAI_MODEL || 'gpt-4o-mini'
+  const tiersSmall = getInitialSettings().modelTiers?.small
+  if (tiersSmall) {
+    return tiersSmall
   }
-  // Codex provider
-  if (getAPIProvider() === 'codex') {
-    return process.env.OPENAI_MODEL || 'gpt-5.4'
+  // Ollama: model names are user-installed strings — we can't hardcode one.
+  // Use the first model from the /api/tags cache (populated at startup),
+  // falling back to OPENAI_MODEL (the user's configured main-loop model,
+  // at least callable locally). If neither is available, fall through to
+  // the provider default below. Users should set modelTiers.small in
+  // settings.json for a reproducible lightweight model.
+  if (isOllamaProvider()) {
+    const ollamaModel =
+      getCachedOllamaModelOptions()[0]?.value || process.env.OPENAI_MODEL
+    if (ollamaModel) return ollamaModel
   }
-  // GitHub Copilot provider
-  if (getAPIProvider() === 'github') {
-    return process.env.OPENAI_MODEL || 'github:copilot'
-  }
-  // Gemini provider
-  if (getAPIProvider() === 'gemini') {
-    return process.env.GEMINI_MODEL || 'gemini-2.0-flash-lite'
-  }
-
-  // Haiku 4.5 is available on all platforms (first-party, Foundry, Bedrock, Vertex)
+  // ALL_MODEL_CONFIGS maps haiku45 to the cheapest model for every provider
+  // (firstParty, bedrock, vertex, foundry, openai, gemini, github, codex).
+  // Never leaks OPENAI_MODEL / GEMINI_MODEL (main-loop models).
   return getModelStrings().haiku45
 }
 
