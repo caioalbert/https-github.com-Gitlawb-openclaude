@@ -806,6 +806,13 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
     }
 
     const isActiveSavedProfile = getActiveProviderProfile()?.id === saved.id
+    if (isActiveSavedProfile) {
+      setAppState(prev => ({
+        ...prev,
+        mainLoopModel: saved.model,
+        mainLoopModelForSession: null,
+      }))
+    }
     const settingsOverrideError = isActiveSavedProfile
       ? clearStartupProviderOverrideFromUserSettings()
       : null
