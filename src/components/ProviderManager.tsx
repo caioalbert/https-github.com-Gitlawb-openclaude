@@ -3,6 +3,7 @@ import * as React from 'react'
 import { DEFAULT_CODEX_BASE_URL } from '../services/api/providerConfig.js'
 import { Box, Text } from '../ink.js'
 import { useKeybinding } from '../keybindings/useKeybinding.js'
+import { useSetAppState } from '../state/AppState.js'
 import type { ProviderProfile } from '../utils/config.js'
 import {
   clearCodexCredentials,
@@ -580,6 +581,11 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
           return
         }
 
+        setAppState(prev => ({
+          ...prev,
+          mainLoopModel: GITHUB_PROVIDER_DEFAULT_MODEL,
+          mainLoopModelForSession: null,
+        }))
         refreshProfiles()
         setAppState(prev => ({
           ...prev,
@@ -608,6 +614,11 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
       }))
 
       providerLabel = active.name
+      setAppState(prev => ({
+        ...prev,
+        mainLoopModel: active.model,
+        mainLoopModelForSession: null,
+      }))
       const settingsOverrideError =
         clearStartupProviderOverrideFromUserSettings()
       const isActiveCodexOAuth = isCodexOAuthProfile(
