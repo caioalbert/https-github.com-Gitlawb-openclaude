@@ -14,7 +14,7 @@ import { KeybindingSetup } from './keybindings/KeybindingProviderSetup.js';
 import { startDeferredPrefetches } from './main.js';
 import { checkGate_CACHED_OR_BLOCKING, initializeGrowthBook, resetGrowthBook } from './services/analytics/growthbook.js';
 import { isQualifiedForGrove } from './services/api/grove.js';
-import { handleMcpjsonServerApprovals } from './services/mcpServerApproval.js';
+import { maybeHandleMcpjsonServerApprovals } from './services/mcp/mcpApprovalHelper.js';
 import { AppStateProvider } from './state/AppState.js';
 import { onChangeAppState } from './state/onChangeAppState.js';
 import { normalizeApiKeyForConfig } from './utils/authPortable.js';
@@ -28,7 +28,6 @@ import { applyConfigEnvironmentVariables } from './utils/managedEnv.js';
 import { usesAnthropicAccountFlow } from './utils/model/providers.js';
 import type { PermissionMode } from './utils/permissions/PermissionMode.js';
 import { getBaseRenderOptions } from './utils/renderOptions.js';
-import { getSettingsWithAllErrors } from './utils/settings/allErrors.js';
 import { hasAutoModeOptIn, hasSkipDangerousModePermissionPrompt } from './utils/settings/settings.js';
 export function completeOnboarding(): void {
   saveGlobalConfig(current => ({
@@ -158,24 +157,17 @@ export async function showSetupScreens(root: Root, permissionMode: PermissionMod
     // Now that trust is established, prefetch system context if it wasn't already
     void getSystemContext();
 
-    // Skip MCP approval dialogs for third-party providers (no interactive auth prompts)
-    if (usesAnthropicSetup) {
-      // If settings are valid, check for any mcp.json servers that need approval
-      const {
-        errors: allErrors
-      } = getSettingsWithAllErrors();
-      if (allErrors.length === 0) {
-        await handleMcpjsonServerApprovals(root);
-      }
+    // If settings are valid, check for any mcp.json servers that need approval.
+    // This must happen for all providers, not just the first-party Anthropic flow.
+    await maybeHandleMcpjsonServerApprovals(root);
 
-      // Check for claude.md includes that need approval
-      if (await shouldShowClaudeMdExternalIncludesWarning()) {
-        const externalIncludes = getExternalClaudeMdIncludes(await getMemoryFiles(true));
-        const {
-          ClaudeMdExternalIncludesDialog
-        } = await import('./components/ClaudeMdExternalIncludesDialog.js');
-        await showSetupDialog(root, done => <ClaudeMdExternalIncludesDialog onDone={done} isStandaloneDialog externalIncludes={externalIncludes} />);
-      }
+    // Check for claude.md includes that need approval only in the Anthropic setup flow.
+    if (usesAnthropicSetup && await shouldShowClaudeMdExternalIncludesWarning()) {
+      const externalIncludes = getExternalClaudeMdIncludes(await getMemoryFiles(true));
+      const {
+        ClaudeMdExternalIncludesDialog
+      } = await import('./components/ClaudeMdExternalIncludesDialog.js');
+      await showSetupDialog(root, done => <ClaudeMdExternalIncludesDialog onDone={done} isStandaloneDialog externalIncludes={externalIncludes} />);
     }
   }
 
