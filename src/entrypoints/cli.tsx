@@ -1,14 +1,40 @@
 import { feature } from 'bun:bundle';
 import {
-  isLocalProviderUrl,
-  resolveCodexApiCredentials,
-  resolveProviderRequest,
-} from '../services/api/providerConfig.js'
-import {
   applyProfileEnvToProcessEnv,
   buildStartupEnvFromProfile,
-  redactSecretValueForDisplay,
 } from '../utils/providerProfile.js'
+import {
+  getProviderValidationError,
+  validateProviderEnvOrExit,
+} from '../utils/providerValidation.js'
+
+// OpenClaude: polyfill globalThis.File for Node < 20.
+// undici v7 references `File` at module evaluation time (webidl type
+// assertions). Node 18 lacks the global, causing a ReferenceError inside
+// the bundled __commonJS require chain which deadlocks the process when a
+// proxy is configured (configureGlobalAgents → require_undici).
+// eslint-disable-next-line custom-rules/no-top-level-side-effects
+if (typeof globalThis.File === 'undefined') {
+  try {
+    // Node 18.13+ exposes File in node:buffer but not as a global.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { File: NodeFile } = require('node:buffer')
+    // @ts-expect-error -- polyfilling missing global
+    globalThis.File = NodeFile
+  } catch {
+    // Absolute fallback: stub so `MakeTypeAssertion(File)` doesn't throw.
+    // @ts-expect-error -- minimal polyfill
+    globalThis.File = class File extends Blob {
+      name: string
+      lastModified: number
+      constructor(parts: BlobPart[], name: string, opts?: FilePropertyBag) {
+        super(parts, opts)
+        this.name = name
+        this.lastModified = opts?.lastModified ?? Date.now()
+      }
+    }
+  }
+}
 
 // OpenClaude: disable experimental API betas by default.
 // Tool search (defer_loading), global cache scope, and context management
@@ -42,82 +68,6 @@ if (feature('ABLATION_BASELINE') && process.env.CLAUDE_CODE_ABLATION_BASELINE) {
   }
 }
 
-function isEnvTruthy(value: string | undefined): boolean {
-  if (!value) return false
-  const normalized = value.trim().toLowerCase()
-  return normalized !== '' && normalized !== '0' && normalized !== 'false' && normalized !== 'no'
-}
-
-function getProviderValidationError(
-  env: NodeJS.ProcessEnv = process.env,
-): string | null {
-  const useOpenAI = isEnvTruthy(env.CLAUDE_CODE_USE_OPENAI)
-  const useGithub = isEnvTruthy(env.CLAUDE_CODE_USE_GITHUB)
-
-  if (isEnvTruthy(env.CLAUDE_CODE_USE_GEMINI)) {
-    if (!(env.GEMINI_API_KEY ?? env.GOOGLE_API_KEY)) {
-      return 'GEMINI_API_KEY is required when CLAUDE_CODE_USE_GEMINI=1.'
-    }
-    return null
-  }
-
-  if (useGithub && !useOpenAI) {
-    const token = (env.GITHUB_TOKEN?.trim() || env.GH_TOKEN?.trim()) ?? ''
-    if (!token) {
-      return 'GITHUB_TOKEN or GH_TOKEN is required when CLAUDE_CODE_USE_GITHUB=1.'
-    }
-    return null
-  }
-
-  if (!useOpenAI) {
-    return null
-  }
-
-  const request = resolveProviderRequest({
-    model: env.OPENAI_MODEL,
-    baseUrl: env.OPENAI_BASE_URL,
-  })
-
-  if (env.OPENAI_API_KEY === 'SUA_CHAVE') {
-    return 'Invalid OPENAI_API_KEY: placeholder value SUA_CHAVE detected. Set a real key or unset for local providers.'
-  }
-
-  if (request.transport === 'codex_responses') {
-    const credentials = resolveCodexApiCredentials(env)
-    if (!credentials.apiKey) {
-      const authHint = credentials.authPath
-        ? ` or put auth.json at ${credentials.authPath}`
-        : ''
-      const safeModel =
-        redactSecretValueForDisplay(request.requestedModel, env) ??
-        'the requested model'
-      return `Codex auth is required for ${safeModel}. Set CODEX_API_KEY${authHint}.`
-    }
-    if (!credentials.accountId) {
-      return 'Codex auth is missing chatgpt_account_id. Re-login with Codex or set CHATGPT_ACCOUNT_ID/CODEX_ACCOUNT_ID.'
-    }
-    return null
-  }
-
-  if (!env.OPENAI_API_KEY && !isLocalProviderUrl(request.baseUrl)) {
-    const hasGithubToken = !!(env.GITHUB_TOKEN?.trim() || env.GH_TOKEN?.trim())
-    if (useGithub && hasGithubToken) {
-      return null
-    }
-    return 'OPENAI_API_KEY is required when CLAUDE_CODE_USE_OPENAI=1 and OPENAI_BASE_URL is not local.'
-  }
-
-  return null
-}
-
-function validateProviderEnvOrExit(): void {
-  const error = getProviderValidationError()
-  if (error) {
-    console.error(error)
-    process.exit(1)
-  }
-}
-
 /**
  * Bootstrap entrypoint - checks for special flags before loading the full CLI.
  * All imports are dynamic to minimize module evaluation for fast paths.
@@ -146,20 +96,23 @@ async function main(): Promise<void> {
     }
   }
 
+  // Enable configs first so we can read settings
   {
     const { enableConfigs } = await import('../utils/config.js')
     enableConfigs()
+  }
+
+  // Apply settings.env from user settings (includes GitHub provider settings from /onboard-github)
+  {
     const { applySafeConfigEnvironmentVariables } = await import('../utils/managedEnv.js')
     applySafeConfigEnvironmentVariables()
-    const { hydrateGithubModelsTokenFromSecureStorage } = await import('../utils/githubModelsCredentials.js')
-    hydrateGithubModelsTokenFromSecureStorage()
   }
 
   const startupEnv = await buildStartupEnvFromProfile({
     processEnv: process.env,
   })
   if (startupEnv !== process.env) {
-    const startupProfileError = getProviderValidationError(startupEnv)
+    const startupProfileError = await getProviderValidationError(startupEnv)
     if (startupProfileError) {
       console.error(
         `Warning: ignoring saved provider profile. ${startupProfileError}`,
@@ -169,7 +122,17 @@ async function main(): Promise<void> {
     }
   }
 
-  validateProviderEnvOrExit()
+  // Hydrate GitHub credentials after profile is applied so CLAUDE_CODE_USE_GITHUB from profile is available
+  {
+    const {
+      hydrateGithubModelsTokenFromSecureStorage,
+      refreshGithubModelsTokenIfNeeded,
+    } = await import('../utils/githubModelsCredentials.js')
+    await refreshGithubModelsTokenIfNeeded()
+    hydrateGithubModelsTokenFromSecureStorage()
+  }
+
+  await validateProviderEnvOrExit()
 
   // Print the gradient startup screen before the Ink UI loads
   const { printStartupScreen } = await import('../components/StartupScreen.js')
