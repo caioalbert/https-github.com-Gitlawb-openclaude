@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 
 export type FindingSeverity = 'high' | 'medium'
 
@@ -56,6 +57,21 @@ const EXECUTABLE_PATH_REGEX =
   /\.(?:sh|bash|zsh|ps1|exe|msi|pkg|deb|rpm|zip|tar|tgz|gz|xz|dmg|appimage)(?:$|[?#])/i
 const SENSITIVE_PATH_REGEX =
   /^(?:\.github\/workflows\/|scripts\/|bin\/|install(?:\/|\.|$)|.*(?:Dockerfile|docker-compose|compose\.ya?ml)$)/i
+
+/**
+ * Maximum line distance between a `write*FileAsync` call and an `await spawn*Teammate`
+ * call for them to be considered part of the same logical operation.
+ *
+ * Why 100? A single async function body that both writes a team file and spawns
+ * a teammate is unlikely to span more than ~100 lines in practice.  Pairs that
+ * are farther apart almost certainly belong to different functions or different
+ * code paths and should not be flagged as a write-before-spawn ordering violation.
+ *
+ * The scope heuristic (no closing brace at the same indentation between the two
+ * calls) provides a second filter, but this distance cap is the primary safeguard
+ * against false positives across unrelated call sites in large files.
+ */
+const MAX_WRITE_SPAWN_DISTANCE = 100
 
 function parseOptions(argv: string[]): CliOptions {
   const options: CliOptions = {
@@ -356,15 +372,109 @@ function findCommandFindings(line: DiffLine): Finding[] {
   return findings
 }
 
-export function scanAddedLines(lines: DiffLine[]): Finding[] {
+/**
+ * Optional injectable file reader — lets tests supply fake file content
+ * without touching the real filesystem.
+ */
+export type FileReader = (path: string) => string
+
+/**
+ * Detects the "write-before-fallible-spawn" anti-pattern in TypeScript/JavaScript
+ * files touched by the PR.
+ *
+ * The bug: a persistent side-effect (file write) is committed before a fallible
+ * async operation (spawn).  If the spawn throws, the write is already on disk and
+ * leaves a ghost entry (e.g. a phantom team member in config.json).
+ *
+ * Detection: reads the current on-disk content of every modified .ts/.tsx file,
+ * then looks for an `await write*FileAsync(` call that appears in the same function
+ * scope as an `await spawn*Teammate(` call, where the write comes first.
+ *
+ * Scope is approximated by checking that no closing brace at the same or lower
+ * indentation level appears between the two calls.
+ */
+export function findFileOrderingFindings(
+  lines: DiffLine[],
+  readFile: FileReader = (p) => readFileSync(p, 'utf-8'),
+): Finding[] {
+  const tsFiles = [
+    ...new Set(
+      lines
+        .filter(
+          l =>
+            /\.[tj]sx?$/.test(l.file) && !SELF_EXCLUDED_FILES.has(l.file),
+        )
+        .map(l => l.file),
+    ),
+  ]
+
+  const findings: Finding[] = []
+
+  for (const file of tsFiles) {
+    let content: string
+    try {
+      content = readFile(file)
+    } catch {
+      continue
+    }
+
+    const fileLines = content.split('\n')
+
+    const writeLines = fileLines
+      .map((text, i) => ({ text, lineNo: i + 1 }))
+      .filter(({ text }) => /\bawait\s+write\w*FileAsync\s*\(/.test(text) && !/^\s*\/\//.test(text))
+
+    const spawnLines = fileLines
+      .map((text, i) => ({ text, lineNo: i + 1 }))
+      .filter(({ text }) => /\bawait\s+spawn\w*Teammate\s*\(/.test(text) && !/^\s*\/\//.test(text))
+
+    for (const write of writeLines) {
+      for (const spawn of spawnLines) {
+        const distance = spawn.lineNo - write.lineNo
+        if (distance <= 0 || distance > MAX_WRITE_SPAWN_DISTANCE) continue
+
+        // Confirm they share the same function scope: no closing brace at the
+        // write's indentation level (or less) should appear between them.
+        const writeIndent = write.text.match(/^(\s*)/)?.[1].length ?? 0
+        const between = fileLines.slice(write.lineNo, spawn.lineNo - 1)
+        const scopeExit = between.some(l => {
+          const indent = l.match(/^(\s*)/)?.[1].length ?? 0
+          return /^\s*\}/.test(l) && indent <= writeIndent
+        })
+
+        if (!scopeExit) {
+          findings.push({
+            severity: 'medium',
+            code: 'write-before-fallible-spawn',
+            file,
+            line: write.lineNo,
+            detail: `File write at line ${write.lineNo} precedes fallible spawn at line ${spawn.lineNo} — a failed spawn leaves a ghost entry on disk`,
+            excerpt: trimExcerpt(write.text),
+          })
+        }
+      }
+    }
+  }
+
+  return findings
+}
+
+export function scanAddedLines(
+  lines: DiffLine[],
+  options?: { readFile?: FileReader },
+): Finding[] {
+  const readFile = options?.readFile
   const findings = lines
     .filter(line => !SELF_EXCLUDED_FILES.has(line.file))
     .flatMap(line => [
-    ...findUrlFindings(line),
-    ...findCommandFindings(line),
-    ...findSensitivePathFindings(line),
+      ...findUrlFindings(line),
+      ...findCommandFindings(line),
+      ...findSensitivePathFindings(line),
+    ])
+  return uniqueFindings([
+    ...findings,
+    ...findFileOrderingFindings(lines, readFile),
   ])
-  return uniqueFindings(findings)
 }
 
 export function getGitDiff(baseRef: string): string {
@@ -423,6 +533,13 @@ function renderText(findings: Finding[]): string {
   return lines.join('\n')
 }
 
+/**
+ * Run the intent scan and return a shell exit code (0 = clean / advisory only,
+ * 1 = findings at or above `options.failOn` severity).
+ *
+ * Diff source: `git diff <options.baseRef>...HEAD` (default base: origin/main).
+ * The pre-commit hook pipes `git diff --cached` directly to `scanAddedLines`.
+ */
 export function run(options: CliOptions): number {
   const diff = getGitDiff(options.baseRef)
   const addedLines = parseAddedLines(diff)

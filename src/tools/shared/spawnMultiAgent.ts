@@ -53,6 +53,7 @@ import { buildInheritedEnvVars } from '../../utils/swarm/spawnUtils.js'
 import {
   getTeamFilePath,
   readTeamFileAsync,
+  buildTeamContextBlock,
   registerTeamForSessionCleanup,
   sanitizeAgentName,
   sanitizeName,
@@ -576,13 +577,14 @@ async function handleSpawnSplitPane(
   })
   await writeTeamFileAsync(teamName, teamFile)
 
-  // Send initial instructions to teammate via mailbox
-  // The teammate's inbox poller will pick this up and submit it as their first turn
+  // Send initial instructions to teammate via mailbox, prepending team context
+  // so the agent knows its roster, lead, and config path from turn one.
+  const teamContext = buildTeamContextBlock(sanitizedName, agent_type, teamFile)
   await writeToMailbox(
     sanitizedName,
     {
       from: TEAM_LEAD_NAME,
-      text: prompt,
+      text: `${teamContext}\n\n${prompt}`,
       timestamp: new Date().toISOString(),
     },
     teamName,
@@ -785,13 +787,14 @@ async function handleSpawnSeparateWindow(
   })
   await writeTeamFileAsync(teamName, teamFile)
 
-  // Send initial instructions to teammate via mailbox
-  // The teammate's inbox poller will pick this up and submit it as their first turn
+  // Send initial instructions to teammate via mailbox, prepending team context
+  // so the agent knows its roster, lead, and config path from turn one.
+  const teamContext = buildTeamContextBlock(sanitizedName, agent_type, teamFile)
   await writeToMailbox(
     sanitizedName,
     {
       from: TEAM_LEAD_NAME,
-      text: prompt,
+      text: `${teamContext}\n\n${prompt}`,
       timestamp: new Date().toISOString(),
     },
     teamName,
@@ -949,11 +952,35 @@ async function handleSpawnInProcess(
     )
   }
 
+  // Build the updated team file in memory (do not write yet — the file write
+  // must be atomic with a successful spawn to avoid ghost members on failure).
+  const teamFile = await ensureTeamFileExists(teamName, context)
+  teamFile.members.push({
+    agentId: teammateId,
+    name: sanitizedName,
+    agentType: agent_type,
+    model,
+    prompt,
+    color: teammateColor,
+    planModeRequired: plan_mode_required,
+    joinedAt: Date.now(),
+    tmuxPaneId: 'in-process',
+    cwd: getCwd(),
+    subscriptions: [],
+    backendType: 'in-process',
+  })
+
+  // Prepend team context to the prompt for in-process teammates.
+  // Unlike pane-based teammates (which receive their first turn via mailbox),
+  // in-process teammates receive the prompt directly via startInProcessTeammate().
+  const teamContext = buildTeamContextBlock(sanitizedName, agent_type, teamFile)
+  const promptWithContext = `${teamContext}\n\n${prompt}`
+
   // Spawn in-process teammate
   const config: InProcessSpawnConfig = {
     name: sanitizedName,
     teamName,
-    prompt,
+    prompt: promptWithContext,
     color: teammateColor,
     planModeRequired: plan_mode_required ?? false,
     model,
@@ -964,6 +991,10 @@ async function handleSpawnInProcess(
   if (!result.success) {
     throw new Error(result.error ?? 'Failed to spawn in-process teammate')
   }
+
+  // Persist the new member only after spawn succeeds — this prevents ghost
+  // teammates in the team file if the spawn throws or returns failure.
+  await writeTeamFileAsync(teamName, teamFile)
 
   // Debug: log what spawn returned
   logForDebugging(
@@ -982,7 +1013,7 @@ async function handleSpawnInProcess(
         parentSessionId: result.teammateContext.parentSessionId,
       },
       taskId: result.taskId,
-      prompt,
+      prompt: promptWithContext,
       description: input.description,
       model,
       agentDefinition,
@@ -1047,30 +1078,7 @@ async function handleSpawnInProcess(
       },
     }
   })
-
-  // Register agent in the team file (auto-create if missing)
-  const teamFile = await ensureTeamFileExists(teamName, context)
-  teamFile.members.push({
-    agentId: teammateId,
-    name: sanitizedName,
-    agentType: agent_type,
-    model,
-    prompt,
-    color: teammateColor,
-    planModeRequired: plan_mode_required,
-    joinedAt: Date.now(),
-    tmuxPaneId: 'in-process',
-    cwd: getCwd(),
-    subscriptions: [],
-    backendType: 'in-process',
-  })
-  await writeTeamFileAsync(teamName, teamFile)
-
-  // Note: Do NOT send the prompt via mailbox for in-process teammates.
-  // In-process teammates receive the prompt directly via startInProcessTeammate().
-  // The mailbox is only needed for tmux-based teammates which poll for their initial message.
-  // Sending via both paths would cause duplicate welcome messages.
-
+  
   return {
     data: {
       teammate_id: teammateId,
